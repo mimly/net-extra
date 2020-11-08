@@ -1,0 +1,47 @@
+#!/bin/bash
+
+if [[ "$EUID" -ne "0" ]] ; then
+    echo -e "$0: ${RED:2:11}Permission denied\nONLY ROOT IS ALLOWED TO RUN THIS SCRIPT${REGULAR:2:11}" && exit 1 ;
+fi
+
+function echoTitle {
+    echo -e "${LIGHT_CYAN:2:11}$1\033[0;91m"
+}
+
+echo -e '\033[0;91m'
+
+IPTABLES=/sbin/iptables
+IP6TABLES=/sbin/ip6tables
+
+log_options="--log-level 7 --log-macdecode --log-ip-options --log-tcp-options --log-uid"
+
+echoTitle "[+] Setting up raw table..."
+$IPTABLES -t raw -A PREROUTING -p icmp -j LOG --log-prefix="raw PREROUTING>" $log_options
+$IPTABLES -t raw -A OUTPUT -p icmp -j LOG --log-prefix="raw OUTPUT>" $log_options
+
+echoTitle "[+] Setting up mangle table..."
+$IPTABLES -t mangle -A PREROUTING -p icmp -j LOG --log-prefix="mangle PREROUTING>" $log_options
+$IPTABLES -t mangle -I INPUT -p icmp -j LOG --log-prefix="mangle INPUT>" $log_options
+$IPTABLES -t mangle -I FORWARD -p icmp -j LOG --log-prefix="mangle FORWARD>" $log_options
+$IPTABLES -t mangle -A OUTPUT -p icmp -j LOG --log-prefix="mangle OUTPUT>" $log_options
+$IPTABLES -t mangle -I POSTROUTING -p icmp -j LOG --log-prefix="mangle POSTROUTING>" $log_options
+
+echoTitle "[+] Setting up NAT table..."
+$IPTABLES -t nat -A PREROUTING -p icmp -j LOG --log-prefix="nat PREROUTING>" $log_options
+$IPTABLES -t nat -A INPUT -p icmp -j LOG --log-prefix="nat INPUT>" $log_options
+$IPTABLES -t nat -A OUTPUT -p icmp -j LOG --log-prefix="nat OUTPUT>" $log_options
+$IPTABLES -t nat -A POSTROUTING -p icmp -j LOG --log-prefix="nat POSTROUTING>" $log_options
+
+echoTitle "[+] Setting up filter table..."
+$IPTABLES -t filter -A INPUT -p icmp -j LOG --log-prefix="filter INPUT>" $log_options
+$IPTABLES -t filter -A FORWARD -p icmp -j LOG --log-prefix="filter FORWARD>" $log_options
+$IPTABLES -t filter -A OUTPUT -p icmp -j LOG --log-prefix="filter OUTPUT>" $log_options
+
+echoTitle "[+] Setting up security table..."
+$IPTABLES -t security -A INPUT -p icmp -j LOG --log-prefix="security INPUT>" $log_options
+$IPTABLES -t security -A FORWARD -p icmp -j LOG --log-prefix="security FORWARD>" $log_options
+$IPTABLES -t security -A OUTPUT -p icmp -j LOG --log-prefix="security OUTPUT>" $log_options
+
+echo -e "${REGULAR:2:11}"
+
+exit

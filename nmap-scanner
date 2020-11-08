@@ -1,0 +1,52 @@
+#!/bin/bash
+
+if [[ "$EUID" -ne "0" ]] ; then
+    echo -e "$0: ${DARK_RED:2:11}Permission denied\nONLY ROOT IS ALLOWED TO RUN THIS SCRIPT${REGULAR:2:11}" && exit 1 ;
+fi
+
+function echoTitle {
+    echo -e "${YELLOW_B:2:11}$1${YELLOW:2:11}"
+}
+
+echo -e "${YELLOW:2:11}"
+
+IPTABLES=/sbin/iptables
+IP6TABLES=/sbin/ip6tables
+NMAP=/usr/bin/nmap
+DISABLE_FIREWALL=/home/mimly/Scripts/disable-firewall
+
+# ACCEPT or DROP
+POLICY="DROP"
+TARGET="DROP"
+TARGET2="REJECT"
+TARGET3="ACCEPT"
+
+echoTitle "[+] Disabling existing firewall..."
+$DISABLE_FIREWALL 2>&1 >/dev/null
+echo "DONE"
+
+echoTitle "[+] Setting up firewall..."
+echo "Policy on INPUT and OUTPUT chain in the filter table: $POLICY"
+$IPTABLES -t filter -P INPUT $POLICY ;
+$IPTABLES -t filter -P OUTPUT $POLICY ;
+echo "TCP port 1234 as a source port for nmap"
+$IPTABLES -t filter -A OUTPUT -m tcp -p tcp --sport 1234 -j ACCEPT ;
+echo "TCP port 1111: $TARGET"
+$IPTABLES -t filter -A INPUT -m tcp -p tcp --dport 1111 -j $TARGET ;
+echo "TCP port 2222: $TARGET2"
+$IPTABLES -t filter -A INPUT -m tcp -p tcp --dport 2222 -j $TARGET2 ;
+echo "TCP port 3333: $TARGET3"
+$IPTABLES -t filter -A INPUT -m tcp -p tcp --dport 3333 -j $TARGET3 ;
+
+echoTitle "[+] Scanning ports using nmap..."
+# -r scan consequently from 0 to 65535
+# -n no DNS queries
+$NMAP -sW -vv -dd -g1234 -r -n -p0-65535 127.0.0.1
+
+echoTitle "[+] Disabling existing firewall..."
+$DISABLE_FIREWALL 2>&1 >/dev/null
+echo "DONE"
+
+echo -e "${REGULAR:2:11}"
+
+exit

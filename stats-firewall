@@ -1,0 +1,26 @@
+#!/bin/bash
+
+if [[ "$EUID" -ne "0" ]] ; then
+    echo -e "$0: ${DARK_RED:2:11}Permission denied\nONLY ROOT IS ALLOWED TO RUN THIS SCRIPT${REGULAR:2:11}" && exit 1 ;
+fi
+
+function echoTitle {
+    echo -e "${CYAN_B:2:11}$1${CYAN:2:11}"
+}
+
+echo -e "${CYAN:2:11}"
+
+IPTABLES=/sbin/iptables
+IP6TABLES=/sbin/ip6tables
+
+echoTitle "IP accounting statistics by protocol, IP address or service port for both ingoing and outgoing traffic: "
+select chain in IN_PROTO IN_IP IN_PORT OUT_PROTO OUT_IP OUT_PORT ; do
+    $IPTABLES -L $chain -v -n -x --line-numbers ;
+    read -n 1 -s -r -p "Press any key to continue..." ;
+    clear ;
+    echoTitle "IP accounting statistics by protocol, IP address or service port for both ingoing and outgoing traffic: " ;
+done
+
+exit
+
+echo -e "${REGULAR:2:11}"
