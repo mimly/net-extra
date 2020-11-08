@@ -1,0 +1,72 @@
+#!/bin/bash
+
+#NO_BACKGROUND='\033[0;37m'
+trap 'echo -e $NO_BACKGROUND${REGULAR:2:11} ; trap - SIGINT ; exit' SIGINT
+
+#DEFAULT_BGCOLOR='\033[1;107m'
+DEFAULT_FGCOLOR=${WHITE_B:2:11}
+echo -e "$DEFAULT_BGCOLOR$DEFAULT_FGCOLOR"
+
+function getNetworkProfile {
+    local networkProfile=$(netctl list | awk '$1=="*" { print $2 }')
+    if [[ -z $networkProfile ]] ; then
+        echo -e "${RED_B:2:11}disconnected$DEFAULT_FGCOLOR"
+    else
+        echo -e "${GREEN_B:2:11}$networkProfile$DEFAULT_FGCOLOR"
+    fi
+}
+
+function getOpenVPNStatus {
+    local openVPNStatus=$(sudo systemctl status openvpn-$1@$1.service | awk 'NR==3 { print $2 }')
+    if [[ $openVPNStatus == "active" ]] ; then
+        echo -e "${GREEN_B:2:11}$openVPNStatus$DEFAULT_FGCOLOR"
+    else   
+        echo -e "${RED_B:2:11}$openVPNStatus$DEFAULT_FGCOLOR"
+    fi
+}
+
+function showNetworkStatus {
+    printf "%-26s%s\n%-26s%s\n%-26s%s\n" "Connection status:" "$(getNetworkProfile)" "OpenVPN client status:" "$(getOpenVPNStatus "client")" "OpenVPN server status:" "$(getOpenVPNStatus "server")"
+}
+
+if [[ $# == 0 ]] ; then
+
+    showNetworkStatus && printf "\n"
+
+    printf "%s\n" "Choosing the network profile..." &&
+    select networkProfile in $(ls -p /etc/netctl/ | grep -v /) ; do   
+	    sudo netctl switch-to $networkProfile && sudo netctl wait-online $networkProfile && showNetworkStatus
+    done
+    
+    printf "%s\n" "Enabling IP forwarding and adding a masquerade firewall rule in order to get OpenVPN server to works properly..."
+    if [[ "$(read -e -p '[y/N]? > '; echo $REPLY)" == [Yy]* ]] ; then
+        su -c 'echo 1 > /proc/sys/net/ipv4/ip_forward && 
+            echo "IP forwarding enabled" && 
+            iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o wlp2s0 -j MASQUERADE && 
+            echo "iptables updated"'
+    else
+        printf "\n"
+    fi
+
+    printf "%s\n" "Connecting through the OpenVPN tunnel..." &&
+    select openvpnProfile in {start,stop,reload,restart,status}\ openvpn-{client@client,server@server}.service ; do
+        sudo systemctl $openvpnProfile && showNetworkStatus    
+    done
+    
+    printf "%s\n" "Mounting the Heavens network..." &&
+    select mnt in {umount-heaven,mount-heaven\ {ro,rw}} ; do
+        $mnt
+    done 
+    
+    printf "%s\n" "Disconnecting from all connections..." &&
+    if [[ "$(read -e -p '[y/N]? > '; echo $REPLY)" == [Yy]* ]] ; then
+	    sudo netctl stop-all && printf "\n" && showNetworkStatus
+    else
+        printf "\n"
+    fi
+
+else
+    sudo netctl switch-to wlp2s0_Heaven5G && sudo netctl wait-online wlp2s0_Heaven5G && showNetworkStatus
+fi
+
+echo -e "^D$NO_BACKGROUND${REGULAR:2:11}" && trap - SIGINT

@@ -1,0 +1,368 @@
+#!/bin/bash
+
+if [[ "$EUID" -ne "0" ]] ; then
+    echo -e "$0: ${DARK_RED:2:11}Permission denied\nONLY ROOT IS ALLOWED TO RUN THIS SCRIPT${REGULAR:2:11}" && exit 1 ;
+fi
+
+function echoTitle {
+    echo -e "${GREEN_B:2:11}$1${GREEN:2:11}"
+}
+
+echo -e "${GREEN:2:11}"
+
+IPTABLES=/sbin/iptables
+IP6TABLES=/sbin/ip6tables
+MODPROBE=/sbin/modprobe
+
+echoTitle "[+] Flushing existing iptables rules..."
+$IPTABLES -F &&
+$IPTABLES -F -t raw &&
+$IPTABLES -F -t mangle &&
+$IPTABLES -F -t nat &&
+$IPTABLES -F -t security &&
+$IPTABLES -X &&
+$IPTABLES -X -t raw &&
+$IPTABLES -X -t mangle &&
+$IPTABLES -X -t nat &&
+$IPTABLES -X -t security &&
+echo "IPTABLESv4 flushed"
+$IP6TABLES -F &&
+echo "IPTABLESv6 flushed"
+
+echoTitle "[+] Setting up default DROP policy..."
+echoTitle "[+] Disabling IPv4 traffic..." &&
+$IPTABLES -P INPUT DROP &&
+$IPTABLES -P OUTPUT ACCEPT &&
+$IPTABLES -P FORWARD DROP &&
+echo "IPv4 traffic disabled"
+echoTitle "[+] Disabling IPv6 traffic..." &&
+$IP6TABLES -P INPUT DROP &&
+$IP6TABLES -P OUTPUT DROP &&
+$IP6TABLES -P FORWARD DROP &&
+echo "IPv6 traffic disabled"
+
+echoTitle "[+] Loading netfilter kernel (`uname -r`) modules..."
+select mod in $(ls /lib/modules/`uname -r`/kernel/net/netfilter/ | grep ko.xz | awk -F. '{ print $1 }') ; do
+    $MODPROBE "$mod" 2>&1 | awk '{ for (i=3; i<=NF; ++i) { if (i==4) { printf " %-23s  ", $i } else { printf "%s ", $i } } printf "\n" }' ;
+    if [[ ${PIPESTATUS[0]} -eq "0" ]] ; then
+        printf "%s  %-23s  %s\n" "Module" "$mod" "has been loaded successfully" ;
+    fi
+done
+
+###
+##
+#   M A N G L E   T A B L E
+##
+###
+
+### 1: Drop invalid packets ### 
+$IPTABLES -t mangle -A PREROUTING -m conntrack --ctstate INVALID -j DROP  
+
+### 2: Drop TCP packets that are new and are not SYN ### 
+$IPTABLES -t mangle -A PREROUTING -p tcp ! --syn -m conntrack --ctstate NEW -j DROP 
+ 
+### 3: Drop SYN packets with suspicious MSS value ### 
+$IPTABLES -t mangle -A PREROUTING -p tcp -m conntrack --ctstate NEW -m tcpmss ! --mss 536:65535 -j DROP  
+
+### 4: Block packets with bogus TCP flags ### 
+$IPTABLES -t mangle -A PREROUTING -p tcp --tcp-flags FIN,SYN,RST,PSH,ACK,URG NONE -j DROP 
+$IPTABLES -t mangle -A PREROUTING -p tcp --tcp-flags FIN,SYN FIN,SYN -j DROP 
+$IPTABLES -t mangle -A PREROUTING -p tcp --tcp-flags SYN,RST SYN,RST -j DROP 
+$IPTABLES -t mangle -A PREROUTING -p tcp --tcp-flags FIN,RST FIN,RST -j DROP 
+$IPTABLES -t mangle -A PREROUTING -p tcp --tcp-flags FIN,ACK FIN -j DROP 
+$IPTABLES -t mangle -A PREROUTING -p tcp --tcp-flags ACK,URG URG -j DROP 
+$IPTABLES -t mangle -A PREROUTING -p tcp --tcp-flags ACK,FIN FIN -j DROP 
+$IPTABLES -t mangle -A PREROUTING -p tcp --tcp-flags ACK,PSH PSH -j DROP 
+$IPTABLES -t mangle -A PREROUTING -p tcp --tcp-flags ALL ALL -j DROP 
+$IPTABLES -t mangle -A PREROUTING -p tcp --tcp-flags ALL NONE -j DROP 
+$IPTABLES -t mangle -A PREROUTING -p tcp --tcp-flags ALL FIN,PSH,URG -j DROP 
+$IPTABLES -t mangle -A PREROUTING -p tcp --tcp-flags ALL SYN,FIN,PSH,URG -j DROP 
+$IPTABLES -t mangle -A PREROUTING -p tcp --tcp-flags ALL SYN,RST,ACK,FIN,URG -j DROP  
+
+### 5: Block spoofed packets ### 
+$IPTABLES -t mangle -A PREROUTING -s 224.0.0.0/3 -j DROP 
+$IPTABLES -t mangle -A PREROUTING -s 169.254.0.0/16 -j DROP 
+$IPTABLES -t mangle -A PREROUTING -s 172.16.0.0/12 -j DROP 
+$IPTABLES -t mangle -A PREROUTING -s 192.0.2.0/24 -j DROP 
+$IPTABLES -t mangle -A PREROUTING -s 192.168.0.0/16 -j DROP 
+$IPTABLES -t mangle -A PREROUTING -s 10.0.0.0/8 -j DROP 
+$IPTABLES -t mangle -A PREROUTING -s 0.0.0.0/8 -j DROP 
+$IPTABLES -t mangle -A PREROUTING -s 240.0.0.0/5 -j DROP 
+$IPTABLES -t mangle -A PREROUTING -s 127.0.0.0/8 ! -i lo -j DROP  
+
+### 6: Drop ICMP (you usually don't need this protocol) ### 
+$IPTABLES -t mangle -A PREROUTING -p icmp -j DROP  
+
+### 7: Drop fragments in all chains ### 
+$IPTABLES -t mangle -A PREROUTING -f -j DROP  
+
+###
+##
+#   F I L T E R   T A B L E
+##
+###
+
+echoTitle "[+] Setting up filter table..." 
+
+echoTitle "[+] Creating logging (incoming packets) chain..."
+$IPTABLES -N IN_LOG
+
+echoTitle "[+] Creating accounting chains..." 
+$IPTABLES -N IN_PROTO &&
+$IPTABLES -N OUT_PROTO &&
+$IPTABLES -N IN_IP &&
+$IPTABLES -N OUT_IP &&
+$IPTABLES -N IN_PORT &&
+$IPTABLES -N OUT_PORT
+
+echoTitle "[+] Creating SSH guarding chain..."
+$IPTABLES -N SSHGUARD
+
+echoTitle "[+] Defining rules in logging chain..." 
+
+## IN_LOG CHAIN ## - logs only incoming packets
+
+$IPTABLES -A IN_LOG -m conntrack --ctstate INVALID -j LOG --log-prefix "(incoming) INVALID DROP> " --log-level 7 --log-macdecode --log-ip-options --log-tcp-options --log-uid
+$IPTABLES -A IN_LOG -m conntrack --ctstate INVALID -j DROP
+$IPTABLES -A IN_LOG -m limit --limit 5/m --limit-burst 10 -j LOG --log-prefix "(incoming) DROP> " --log-level 7 --log-macdecode --log-uid
+$IPTABLES -A IN_LOG -j DROP
+echo "IN_LOG rules defined"
+
+echoTitle "[+] Defining rules in accounting chains..." 
+
+## IN_PROTO CHAIN ##
+
+for proto in tcp udp icmp ; do
+    if [[ "$proto" == "icmp" ]] ; then
+        $IPTABLES -A IN_PROTO -i wlp2s0 -m $proto -p $proto --icmp-type any ;
+    else
+        $IPTABLES -A IN_PROTO -i wlp2s0 -m $proto -p $proto ;
+    fi
+done
+echo "IN_PROTO rules defined"
+
+## OUT_PROTO CHAIN ##
+
+for proto in tcp udp icmp ; do
+    if [[ "$proto" == "icmp" ]] ; then
+        $IPTABLES -A OUT_PROTO -o wlp2s0 -m $proto -p $proto --icmp-type any ;
+    else
+        $IPTABLES -A OUT_PROTO -o wlp2s0 -m $proto -p $proto ;
+    fi
+done
+echo "OUT_PROTO rules defined"
+
+## IN_IP CHAIN ##
+
+for ip in 192.168.1.232 ; do 
+   $IPTABLES -A IN_IP -d $ip ;
+done
+echo "IN_IP rules defined"
+
+## OUT_IP CHAIN ##
+
+for ip in 192.168.1.232 ; do 
+   $IPTABLES -A OUT_IP -s $ip ;
+done
+echo "OUT_IP rules defined"
+
+## IN_PORT CHAIN ##
+
+for port in 22 25 53 80 143 443 1123 8080 8911 ; do
+    $IPTABLES -A IN_PORT -i wlp2s0 -p tcp --dport $port ;
+done
+$IPTABLES -A IN_PORT -i wlp2s0 -p tcp --sport 443 ;
+echo "IN_PORT rules defined"
+
+## OUT_PORT CHAIN ##
+
+for port in 22 25 53 80 143 443 1123 8080 8911 ; do
+    $IPTABLES -A OUT_PORT -o wlp2s0 -p tcp --sport $port ;
+done
+$IPTABLES -A OUT_PORT -o wlp2s0 -p tcp --dport 443 ;
+echo "OUT_PORT rules defined"
+
+echoTitle "[+] Defining rules in SSHGUARD chain..." 
+
+## SSHGUARD CHAIN ##
+
+#$IPTABLES -A SSHGUARD -m recent --set --name SSH
+#$IPTABLES -A SSHGUARD -m recent --update --seconds 120 --hitcount 2 --name SSH -j LOG --log-level 7 --log-prefix "(incoming) SSH DROP> " --log-macdecode --log-uid
+#$IPTABLES -A SSHGUARD -m recent --update --seconds 120 --hitcount 2 --name SSH -j DROP
+$IPTABLES -A SSHGUARD -m recent --rcheck --seconds 11 --name AUTH -j LOG --log-level 7 --log-prefix "(incoming) SSH KNOCK> " --log-macdecode --log-uid
+$IPTABLES -A SSHGUARD -m recent --rcheck --seconds 11 --name AUTH -j ACCEPT
+echo "SSHGUARD rules defined"
+
+echoTitle "[+] Defining rules in INPUT chain..." 
+
+## INPUT CHAIN ##
+
+# accounting (stats) rules
+$IPTABLES -A INPUT -j IN_PROTO
+$IPTABLES -A INPUT -j IN_IP
+$IPTABLES -A INPUT -j IN_PORT
+
+# accept loopback traffic
+$IPTABLES -A INPUT -i lo -j ACCEPT
+
+# accept SSH connections from the local network without PORT KNOCKING
+$IPTABLES -A INPUT -m tcp -p tcp --source 192.168.1.0/24 --dport 8911 -m conntrack --ctstate NEW -j ACCEPT -m comment --comment "sshd incoming new (local)"
+
+# PORT KNOCKING (in order to activate sshd)
+$IPTABLES -A INPUT -m tcp -p tcp --dport 1259 -m conntrack --ctstate NEW -m recent --set --name AUTHX -m comment --comment "set flag AUTHX" -j DROP
+$IPTABLES -A INPUT -m tcp -p tcp --dport 9521 -m conntrack --ctstate NEW -m recent ! --rcheck --seconds 11 --name AUTHX -m comment --comment "flag AUTHX set in more than 11 seconds ago" -j DROP 
+$IPTABLES -A INPUT -m tcp -p tcp --dport 9521 -m conntrack --ctstate NEW -m recent --set --name AUTH -m comment --comment "set flag AUTH" -j DROP
+
+# accepting rules
+$IPTABLES -A INPUT -m tcp -p tcp --dport 8911 -m conntrack --ctstate NEW -j SSHGUARD -m comment --comment "sshd incoming new"
+
+# PORT KNOCKING (cont.) 
+$IPTABLES -A INPUT -m tcp -p tcp -m multiport ! --dports 1259,9521 -m conntrack --ctstate NEW -m recent --remove --name AUTH -m comment --comment "remove flag AUTH"
+$IPTABLES -A INPUT -m tcp -p tcp -m multiport ! --dports 1259,9521 -m conntrack --ctstate NEW -m recent --remove --name AUTHX -m comment --comment "remove flag AUTHX"
+
+# accepting rules (cont.)
+$IPTABLES -A INPUT -m tcp -p tcp --dport 8911 -m conntrack --ctstate ESTABLISHED -j ACCEPT -m comment --comment "sshd incoming established"
+$IPTABLES -A INPUT -m tcp -p tcp --sport 22 -m conntrack --ctstate ESTABLISHED -j ACCEPT -m comment --comment "ssh outgoing 22"
+$IPTABLES -A INPUT -m tcp -p tcp --sport 8911 -m conntrack --ctstate ESTABLISHED -j ACCEPT -m comment --comment "ssh outgoing 8989"
+$IPTABLES -A INPUT -m tcp -p tcp --sport 53 -j ACCEPT -m comment --comment "dns tcp"
+$IPTABLES -A INPUT -m udp -p udp --sport 53 -j ACCEPT -m comment --comment "dns udp"
+$IPTABLES -A INPUT -m tcp -p tcp --sport 68 --dport 67 -j ACCEPT -m comment --comment "dhcp tcp"
+$IPTABLES -A INPUT -m udp -p udp --sport 68 --dport 67 -j ACCEPT -m comment --comment "dhcp udp"
+$IPTABLES -A INPUT -m tcp -p tcp --sport 80 -m conntrack --ctstate ESTABLISHED -j ACCEPT -m comment --comment "http"
+$IPTABLES -A INPUT -m tcp -p tcp --sport 443 -m conntrack --ctstate ESTABLISHED -j ACCEPT -m comment --comment "https"
+$IPTABLES -A INPUT -m tcp -p tcp --sport 445 -m mac --mac-source 38:2c:4a:6b:e7:08 -j ACCEPT -m comment --comment "smb"
+
+# transmission bit torrent client rules
+for proto in tcp udp ; do
+    for port in 51413 ; do
+        $IPTABLES -A INPUT -m $proto -p $proto --sport $port -j ACCEPT -m comment --comment "transmission bit torrent client"
+        $IPTABLES -A INPUT -m $proto -p $proto --dport $port -j ACCEPT -m comment --comment "transmission bit torrent client"
+    done
+done
+
+# logging rule
+$IPTABLES -A INPUT -j IN_LOG
+
+echo "INPUT rules defined"
+
+echoTitle "[+] Defining rules in OUTPUT chain..." 
+
+## OUTPUT CHAIN ##
+
+$IPTABLES -A OUTPUT -j OUT_PROTO
+$IPTABLES -A OUTPUT -j OUT_IP
+$IPTABLES -A OUTPUT -j OUT_PORT
+
+echo "OUTPUT rules defined"
+
+echoTitle "[+] Defining rules in FORWARD chain..." 
+
+## FORWARD CHAIN ##
+
+echo "FORWARD no rules (DROP per default)"
+
+###
+##
+#   N A T   T A B L E
+##
+###
+
+echoTitle "[+] Enabling IP forwarding..."
+if [[ "$(read -e -p '[y/N]? > '; echo $REPLY)" == [Yy]* ]] ; then
+    echo 1 > /proc/sys/net/ipv4/ip_forward &&
+    echo "IP_FORWARD enabled"
+else
+    echo 0 > /proc/sys/net/ipv4/ip_forward &&
+    echo "IP_FORWARD disabled"
+fi
+
+echo -e "${REGULAR:2:11}"
+
+exit
+
+
+
+
+
+####### I N P U T ######
+#echoTitle "[+] Setting up INPUT chain..."
+#
+#### state tracking rules
+#$IPTABLES -A INPUT -m conntrack --ctstate INVALID -j LOG --log-prefix "DROP INVALID " --log-ip-options --log-tcp-options
+#$IPTABLES -A INPUT -m conntrack --ctstate INVALID -j DROP
+#$IPTABLES -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+#
+#### anti-spoofing rules
+#$IPTABLES -A INPUT -i $INT_INTF ! -s $INT_NET -j LOG --log-prefix "SPOOFED PKT "
+#$IPTABLES -A INPUT -i $INT_INTF ! -s $INT_NET -j DROP
+#
+#### ACCEPT rules
+#$IPTABLES -A INPUT -i $INT_INTF -p tcp -s $INT_NET --dport 22 -m conntrack --ctstate NEW -j ACCEPT
+#$IPTABLES -A INPUT -p icmp --icmp-type echo-request -j ACCEPT
+#
+#### default INPUT LOG rule
+#$IPTABLES -A INPUT ! -i lo -j LOG --log-prefix "DROP " --log-ip-options --log-tcp-options
+#
+#### make sure that loopback traffic is accepted
+#$IPTABLES -A INPUT -i lo -j ACCEPT
+#
+####### O U T P U T ######
+#echoTitle "[+] Setting up OUTPUT chain..."
+#
+#### state tracking rules
+#$IPTABLES -A OUTPUT -m conntrack --ctstate INVALID -j LOG --log-prefix "DROP INVALID " --log-ip-options --log-tcp-options
+#$IPTABLES -A OUTPUT -m conntrack --ctstate INVALID -j DROP
+#$IPTABLES -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+#
+#### ACCEPT rules for allowing connections out
+#$IPTABLES -A OUTPUT -p tcp --dport 21 -m conntrack --ctstate NEW -j ACCEPT
+#$IPTABLES -A OUTPUT -p tcp --dport 22 -m conntrack --ctstate NEW -j ACCEPT
+#$IPTABLES -A OUTPUT -p tcp --dport 25 -m conntrack --ctstate NEW -j ACCEPT
+#$IPTABLES -A OUTPUT -p tcp --dport 43 -m conntrack --ctstate NEW -j ACCEPT
+#$IPTABLES -A OUTPUT -p tcp --dport 80 -m conntrack --ctstate NEW -j ACCEPT
+#$IPTABLES -A OUTPUT -p tcp --dport 443 -m conntrack --ctstate NEW -j ACCEPT
+#$IPTABLES -A OUTPUT -p tcp --dport 4321 -m conntrack --ctstate NEW -j ACCEPT
+#$IPTABLES -A OUTPUT -p tcp --dport 53 -m conntrack --ctstate NEW -j ACCEPT
+#$IPTABLES -A OUTPUT -p udp --dport 53 -m conntrack --ctstate NEW -j ACCEPT
+#$IPTABLES -A OUTPUT -p icmp --icmp-type echo-request -j ACCEPT
+#
+#### default OUTPUT LOG rule
+#$IPTABLES -A OUTPUT ! -o lo -j LOG --log-prefix "DROP " --log-ip-options --log-tcp-options
+#
+#### make sure that loopback traffic is accepted
+#$IPTABLES -A OUTPUT -o lo -j ACCEPT
+#
+####### F O R W A R D ######
+#echoTitle "[+] Setting up FORWARD chain..."
+#
+#### state tracking rules
+#$IPTABLES -A FORWARD -m conntrack --ctstate INVALID -j LOG --log-prefix "DROP INVALID " --log-ip-options --log-tcp-options
+#$IPTABLES -A FORWARD -m conntrack --ctstate INVALID -j DROP
+#$IPTABLES -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+#
+#### anti-spoofing rules
+#$IPTABLES -A FORWARD -i $INT_INTF ! -s $INT_NET -j LOG --log-prefix "SPOOFED PKT "
+#$IPTABLES -A FORWARD -i $INT_INTF ! -s $INT_NET -j DROP
+#
+#### ACCEPT rules
+#$IPTABLES -A FORWARD -p tcp -i $INT_INTF -s $INT_NET --dport 21 -m conntrack --ctstate NEW -j ACCEPT
+#$IPTABLES -A FORWARD -p tcp -i $INT_INTF -s $INT_NET --dport 22 -m conntrack --ctstate NEW -j ACCEPT
+#$IPTABLES -A FORWARD -p tcp -i $INT_INTF -s $INT_NET --dport 25 -m conntrack --ctstate NEW -j ACCEPT
+#$IPTABLES -A FORWARD -p tcp -i $INT_INTF -s $INT_NET --dport 43 -m conntrack --ctstate NEW -j ACCEPT
+#$IPTABLES -A FORWARD -p tcp --dport 80 -m conntrack --ctstate NEW -j ACCEPT
+#$IPTABLES -A FORWARD -p tcp --dport 443 -m conntrack --ctstate NEW -j ACCEPT
+#$IPTABLES -A FORWARD -p tcp -i $INT_INTF -s $INT_NET --dport 4321 -m conntrack --ctstate NEW -j ACCEPT
+#$IPTABLES -A FORWARD -p tcp --dport 53 -m conntrack --ctstate NEW -j ACCEPT
+#$IPTABLES -A FORWARD -p udp --dport 53 -m conntrack --ctstate NEW -j ACCEPT
+#$IPTABLES -A FORWARD -p icmp --icmp-type echo-request -j ACCEPT
+#
+#### default LOG rule
+#$IPTABLES -A FORWARD ! -i lo -j LOG --log-prefix "DROP " --log-ip-options --log-tcp-options
+#
+####### N A T ######
+#echoTitle "[+] Setting up NAT rules..."
+#$IPTABLES -t nat -A PREROUTING -p tcp --dport 80 -i $EXT_INTF -j DNAT --to 192.168.10.3:80
+#$IPTABLES -t nat -A PREROUTING -p tcp --dport 443 -i $EXT_INTF -j DNAT --to 192.168.10.3:443
+#$IPTABLES -t nat -A PREROUTING -p udp --dport 53 -i $EXT_INTF -j DNAT --to 192.168.10.4:53
+#$IPTABLES -t nat -A POSTROUTING -s $INT_NET -o $EXT_INTF -j MASQUERADE
+

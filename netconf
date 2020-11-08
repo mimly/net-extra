@@ -1,0 +1,54 @@
+#!/bin/sh
+
+user=root
+host=192.168.1.1
+path=/home/mimly/LEDE_BusyBox_v1.25.1
+
+#/sbin/wifi && \
+#echo "/sbin/wifi... OK" && \
+
+set_configuration() {
+	conf=$@
+	# Delete all configuration files.
+	ssh $user@$host "rm -r /etc/config/*" &&
+	echo "Current LEDE configuration is deleted..." &&
+	# Copy all configuration files.
+	scp -r "$path/$conf"/config/* $user@$host:/etc/config/ &&
+	echo "New configuration files are loaded now..." &&
+	# Reload and restart the router.	
+	ssh $user@$host "\
+ 		/etc/init.d/network reload && \
+		echo "/etc/init.d/network... reloaded" && \
+		/etc/init.d/network restart && \
+		echo "/etc/init.d/network... restarted" && \
+		echo "/etc/init.d/network... OK" && \
+		/etc/init.d/firewall reload && \
+		echo "/etc/init.d/firewall... reloaded" && \
+		/etc/init.d/firewall restart && \
+		echo "/etc/init.d/firewall... restarted" && \
+		echo "/etc/init.d/firewall... OK"" &&	
+	echo "Current LEDE configuration: $conf"
+}
+
+if [[ -z $1 ]] ; then 
+	echo "Current IP adress: $(ifconfig enp0s25 | awk 'NR==2 {print $2;}')"
+	read -p "Host adress [LEDE router]: " host ;
+	echo ''
+	echo 'Choose LEDE network configuration: '
+	echo '(0) Original'
+	echo '(1) Wireless Distributed System (Atheros)'
+	echo '(2) Wireless Distributed System (Broadcom)'
+	echo '(3) Routed Client Mode (Masqueraded)'
+	echo '(4) Routed Client Mode (Routed)'
+	echo '(*) Quit'
+	read x ; 
+else x=$1 ; 
+fi
+
+case "$x" in
+	"0") set_configuration Original ;;
+	"1") set_configuration Wireless\ Distributed\ System\ \(Atheros\) ;;
+	"2") echo 'TODO' ;;
+	"3") set_configuration Routed\ Client\ Mode\ \(Masqueraded\) ;;
+	"4") echo 'TODO' ;;
+esac

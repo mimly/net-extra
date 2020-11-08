@@ -1,0 +1,63 @@
+#!/bin/bash
+
+if [[ "$EUID" -ne "0" ]] ; then
+    echo -e "$0: ${DARK_RED:2:11}Permission denied\nONLY ROOT IS ALLOWED TO RUN THIS SCRIPT${REGULAR:2:11}" && exit 1 ;
+fi
+
+function echoTitle {
+    echo -e "${RED_B:2:11}$1${RED:2:11}"
+}
+
+echo -e "${RED:2:11}"
+
+IPTABLES=/sbin/iptables
+IP6TABLES=/sbin/ip6tables
+RMMOD=/sbin/rmmod
+
+echoTitle "[+] Flushing existing iptables rules..."
+$IPTABLES -F &&
+$IPTABLES -F -t raw &&
+$IPTABLES -F -t mangle &&
+$IPTABLES -F -t nat &&
+$IPTABLES -F -t security &&
+$IPTABLES -X &&
+$IPTABLES -X -t raw &&
+$IPTABLES -X -t mangle &&
+$IPTABLES -X -t nat &&
+$IPTABLES -X -t security &&
+echo "IPTABLESv4 flushed"
+$IP6TABLES -F &&
+echo "IPTABLESv6 flushed"
+
+echoTitle "[+] Setting up default ACCEPT policy..."
+echoTitle "[+] Enabling IPv4 traffic..." &&
+$IPTABLES -P INPUT ACCEPT &&
+$IPTABLES -P OUTPUT ACCEPT &&
+$IPTABLES -P FORWARD ACCEPT &&
+echo "IPv4 traffic enabled"
+echoTitle "[+] Enabling IPv6 traffic..." &&
+$IP6TABLES -P INPUT ACCEPT &&
+$IP6TABLES -P OUTPUT ACCEPT &&
+$IP6TABLES -P FORWARD ACCEPT &&
+echo "IPv6 traffic enabled"
+
+echoTitle "[+] Removing netfilter kernel (`uname -r`) modules..."
+while read mod; do
+    $RMMOD "$mod" 2>&1 | awk '{ for (i=3; i<=NF; ++i) { if (i==4) { printf " %-23s  ", $i } else { printf "%s ", $i } } printf "\n" }' ;
+    if [[ ${PIPESTATUS[0]} -eq "0" ]] ; then
+        printf "%s  %-23s  %s\n" "Module" "${mod:0:-6}" "has been removed successfully" ;
+    fi
+done < <(ls /lib/modules/`uname -r`/kernel/net/netfilter/ | grep ko.xz)
+
+echoTitle "[+] Enabling IP forwarding..."
+if [[ "$(read -e -p '[y/N]? > '; echo $REPLY)" == [Yy]* ]] ; then
+    echo 1 > /proc/sys/net/ipv4/ip_forward &&
+    echo "IP_FORWARD enabled"
+else
+    echo 0 > /proc/sys/net/ipv4/ip_forward &&
+    echo "IP_FORWARD disabled"
+fi
+
+echo -e "${REGULAR:2:11}"
+
+exit
